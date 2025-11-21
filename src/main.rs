@@ -5,8 +5,7 @@ use axum::{
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::{collections::HashSet, env, net::SocketAddr};
+use std::{env, net::SocketAddr};
 
 #[derive(Serialize)]
 struct ApiResponse {
@@ -24,231 +23,112 @@ struct Gamepass {
     price: i32,
 }
 
-/// Respuesta de /v2/users/{userId}/games (lista de juegos públicos)
+// Respuesta de https://catalog.roblox.com/v1/search/items/details
 #[derive(Deserialize)]
-struct UserGamesResponse {
-    data: Vec<UserGame>,
-    #[serde(default)]
-    nextPageCursor: Option<String>,
+struct CatalogResponse {
+    data: Vec<CatalogItem>,
 }
 
 #[derive(Deserialize)]
-struct UserGame {
-    id: u64, // universeId del juego
-}
-
-/// Respuesta de /v2/games/{gameId}/game-passes
-#[derive(Deserialize)]
-struct RobloxPassList {
-    data: Vec<RobloxPass>,
-}
-
-#[derive(Deserialize)]
-struct RobloxPass {
+struct CatalogItem {
     id: u64,
     name: String,
-    #[allow(dead_code)]
-    productId: Option<u64>,
+    #[serde(default)]
+    price: Option<i32>,
+    // Si luego quieres filtrar por tipo (ropa, pass, etc.), aquí se puede añadir:
+    // #[serde(default)]
+    // assetType: Option<i32>,
 }
 
-/// Pide el PRIMER juego público del usuario (universeId)
-async fn fetch_first_game_id(client: &Client, user_id: u64) -> Option<u64> {
-    let url = format!(
-        "https://games.roblox.com/v2/users/{}/games?accessFilter=Public&limit=1&sortOrder=Asc",
-        user_id
-    );
-
-    println!("[debug] GET {}", url);
-
-    let resp = match client.get(&url).send().await {
-        Ok(r) => r,
-        Err(err) => {
-            println!("[warn] Error pidiendo lista de juegos: {:?}", err);
-            return None;
-        }
-    };
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        println!(
-            "[warn] Lista de juegos devolvió {}: {}",
-            status, text
-        );
-        return None;
-    }
-
-    let body: UserGamesResponse = match resp.json().await {
-        Ok(b) => b,
-        Err(err) => {
-            println!("[warn] Error parseando JSON de juegos: {:?}", err);
-            return None;
-        }
-    };
-
-    if let Some(first) = body.data.first() {
-        println!(
-            "[debug] Primer juego público de usuario {}: universeId={}",
-            user_id, first.id
-        );
-        Some(first.id)
-    } else {
-        println!(
-            "[debug] Usuario {} no tiene juegos públicos en la API.",
-            user_id
-        );
-        None
-    }
-}
-
-/// Handler: /user/:id/passes
+// GET /user/:id/passes
 async fn get_passes(Path(user_id): Path<u64>) -> Json<ApiResponse> {
     let client = Client::new();
 
-    // 1) Conseguir el PRIMER juego público del usuario
-    let maybe_game_id = fetch_first_game_id(&client, user_id).await;
+    // URL directa de Roblox (ya no usamos roproxy)
+    let base_url = "https://catalog.roblox.com/v1/search/items/details";
 
-    let mut result: Vec<Gamepass> = Vec::new();
-    let mut seen_ids: HashSet<u64> = HashSet::new();
-
-    let game_id = match maybe_game_id {
-        Some(id) => id,
-        None => {
-            // Sin juegos → respuesta vacía pero ok=true
-            return Json(ApiResponse {
-                ok: true,
-                user_id,
-                count: 0,
-                passes: vec![],
-            });
-        }
-    };
-
-    // 2) Pedir los gamepasses de ese juego
-    let passes_url = format!(
-        "https://games.roblox.com/v2/games/{}/game-passes?limit=100&sortOrder=Asc",
-        game_id
-    );
+    // Construimos la URL con los mismos parámetros que tu index.js
+    let req = client
+        .get(base_url)
+        .query(&[
+            ("creatorTargetId", user_id.to_string()),
+            ("creatorType", "User".to_string()),
+            ("itemType", "Asset".to_string()),
+            // Puedes activar esto más adelante para solo ciertos tipos:
+            // ("assetTypes", "Pass".to_string()),
+            ("includeNotForSale", "true".to_string()),
+            ("sortType", "Updated".to_string()),
+            ("limit", "28".to_string()), // 10, 28 o 30 son válidos
+        ]);
 
     println!(
-        "[debug] Pidiendo gamepasses del juego (universeId) {}",
-        game_id
+        "[API] Pidiendo catálogo para userId={} en {}",
+        user_id, base_url
     );
 
-    let resp = match client.get(&passes_url).send().await {
-        Ok(r) => r,
-        Err(err) => {
-            println!(
-                "[warn] Error pidiendo gamepasses de juego {}: {:?}",
-                game_id, err
-            );
-            return Json(ApiResponse {
-                ok: true,
-                user_id,
-                count: 0,
-                passes: vec![],
-            });
-        }
-    };
+    let resp = req.send().await;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        println!(
-            "[warn] Gamepasses de juego {} devolvieron {}: {}",
-            game_id, status, text
-        );
-        return Json(ApiResponse {
-            ok: true,
-            user_id,
-            count: 0,
-            passes: vec![],
-        });
-    }
+    let mut passes: Vec<Gamepass> = Vec::new();
+    let mut ok_flag = true;
 
-    let list: RobloxPassList = match resp.json().await {
-        Ok(l) => l,
-        Err(err) => {
-            println!(
-                "[warn] Error parseando JSON de gamepasses (juego {}): {:?}",
-                game_id, err
-            );
-            return Json(ApiResponse {
-                ok: true,
-                user_id,
-                count: 0,
-                passes: vec![],
-            });
-        }
-    };
+    match resp {
+        Ok(r) => {
+            if !r.status().is_success() {
+                let status = r.status();
+                let text = r.text().await.unwrap_or_default();
+                println!("[API] HTTP {} body: {}", status, text);
+                ok_flag = false;
+            } else {
+                match r.json::<CatalogResponse>().await {
+                    Ok(body) => {
+                        println!(
+                            "[API] Items recibidos para {}: {}",
+                            user_id,
+                            body.data.len()
+                        );
 
-    println!(
-        "[debug] Juego {} devolvió {} gamepasses",
-        game_id,
-        list.data.len()
-    );
+                        for item in body.data {
+                            if let Some(price) = item.price {
+                                if price > 0 {
+                                    passes.push(Gamepass {
+                                        id: item.id,
+                                        name: item.name.clone(),
+                                        price,
+                                    });
+                                }
+                            }
+                        }
 
-    // 3) Para cada pase, pedimos detalles (creador, precio)
-    for pass in list.data {
-        if !seen_ids.insert(pass.id) {
-            continue; // evitar duplicados
-        }
-
-        let detail_url = format!(
-            "https://economy.roblox.com/v2/assets/{}/details",
-            pass.id
-        );
-
-        if let Ok(detail_resp) = client.get(&detail_url).send().await {
-            if !detail_resp.status().is_success() {
-                continue;
-            }
-
-            if let Ok(details) = detail_resp.json::<Value>().await {
-                let creator_id = details["Creator"]["Id"].as_u64().unwrap_or(0);
-
-                // Solo los pases que REALMENTE creó este usuario
-                if creator_id != user_id {
-                    continue;
+                        println!(
+                            "[API] Total assets con precio > 0 para {}: {}",
+                            user_id,
+                            passes.len()
+                        );
+                    }
+                    Err(err) => {
+                        println!("[API] Error parseando JSON: {:?}", err);
+                        ok_flag = false;
+                    }
                 }
-
-                let price_i64 = details["PriceInRobux"]
-                    .as_i64()
-                    .or_else(|| details["Price"].as_i64())
-                    .unwrap_or(0);
-
-                let price = price_i64 as i32;
-
-                // Saltar gratuitos
-                if price <= 0 {
-                    continue;
-                }
-
-                result.push(Gamepass {
-                    id: pass.id,
-                    name: pass.name.clone(),
-                    price,
-                });
             }
         }
+        Err(err) => {
+            println!("[API] Error haciendo request a catalog.roblox.com: {:?}", err);
+            ok_flag = false;
+        }
     }
-
-    println!(
-        "[debug] Usuario {}: total de {} gamepasses filtrados en el primer juego",
-        user_id,
-        result.len()
-    );
 
     Json(ApiResponse {
-        ok: true,
+        ok: ok_flag,
         user_id,
-        count: result.len(),
-        passes: result,
+        count: passes.len(),
+        passes,
     })
 }
 
 #[tokio::main]
 async fn main() {
+    // Ruta principal: igual que en tu index.js
     let app = Router::new().route("/user/:id/passes", get(get_passes));
 
     let port: u16 = env::var("PORT")
@@ -256,7 +136,7 @@ async fn main() {
         .parse()
         .unwrap_or(8080);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0,], port));
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     println!("🚀 Rust API escuchando en {addr}");
 
     axum::Server::bind(&addr)
