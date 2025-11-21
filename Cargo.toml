@@ -1,16 +1,11 @@
 [package]
 name = "donations_api"
-version = "0.2.0"
+version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axum = { version = "0.7", features = ["macros", "json"] }
+axum = { version = "0.6.20", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
-
-# IMPORTANTÍSIMO:
-# Desactivamos default-features para evitar problemas con OpenSSL
-# y usamos rustls-tls (funciona muy bien en Railway)
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-
+reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
