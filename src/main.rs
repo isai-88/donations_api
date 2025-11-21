@@ -3,7 +3,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, env, net::SocketAddr};
 
 #[derive(Serialize)]
@@ -22,70 +22,75 @@ struct Gamepass {
     price: i32,
 }
 
-//
-// Respuesta del endpoint:
-// https://apis.roblox.com/game-passes/v1/users/{userId}/game-passes?count=100
-//
 #[derive(Deserialize)]
-struct UserGamePassesResponse {
-    data: Vec<UserGamePassSummary>,
-    // cursors que no usamos, pero los dejamos por si acaso
-    #[allow(dead_code)]
-    previousPageCursor: Option<String>,
-    #[allow(dead_code)]
-    nextPageCursor: Option<String>,
+struct RobloxListResponse {
+    data: Vec<RobloxPass>,
 }
 
 #[derive(Deserialize)]
-struct UserGamePassSummary {
+struct RobloxPass {
     id: u64,
     name: String,
+    #[allow(dead_code)]
+    #[serde(rename = "productId")]
+    product_id: Option<u64>,
 }
 
+// Endpoint principal: GET /user/:id/passes
 async fn get_passes(Path(user_id): Path<u64>) -> Json<ApiResponse> {
+    // De momento seguimos con tu juego principal.
+    // Más adelante, cuando el endpoint de Open Cloud esté estable,
+    // aquí pondremos la llamada para listar TODOS los juegos del usuario.
+    let games = vec![
+        // RobuxReborn 🔥 (root place que ya probaste)
+        98889641203101u64,
+    ];
+
     let mut result: Vec<Gamepass> = Vec::new();
     let mut seen_ids: HashSet<u64> = HashSet::new();
 
-    // 1) Pedimos TODOS los gamepasses del usuario
-    let url = format!(
-        "https://apis.roblox.com/game-passes/v1/users/{}/game-passes?count=100",
-        user_id
-    );
+    for place_id in games {
+        let url = format!(
+            "https://games.roblox.com/v2/games/{}/game-passes?limit=100&sortOrder=Asc",
+            place_id
+        );
 
-    if let Ok(resp) = reqwest::get(&url).await {
-        if let Ok(list) = resp.json::<UserGamePassesResponse>().await {
-            for pass in list.data {
-                // 2) Para cada gamepass, pedimos detalles (precio, creador, etc.)
-                let detail_url = format!(
-                    "https://economy.roblox.com/v2/assets/{}/details",
-                    pass.id
-                );
+        if let Ok(resp) = reqwest::get(&url).await {
+            if let Ok(list) = resp.json::<RobloxListResponse>().await {
+                for pass in list.data {
+                    let detail_url = format!(
+                        "https://economy.roblox.com/v2/assets/{}/details",
+                        pass.id
+                    );
 
-                if let Ok(detail_resp) = reqwest::get(&detail_url).await {
-                    if let Ok(details) = detail_resp.json::<serde_json::Value>().await {
-                        let creator_id = details["Creator"]["Id"].as_u64().unwrap_or(0);
+                    if let Ok(detail_resp) = reqwest::get(&detail_url).await {
+                        if let Ok(details) = detail_resp.json::<serde_json::Value>().await {
+                            // Creador del pase
+                            let creator_id = details["Creator"]["Id"].as_u64().unwrap_or(0);
 
-                        // Por seguridad, comprobamos que realmente sea del usuario
-                        if creator_id == user_id {
-                            let price_i64 = details["PriceInRobux"]
-                                .as_i64()
-                                .or_else(|| details["Price"].as_i64())
-                                .unwrap_or(0);
+                            // Solo queremos pases cuyo creador sea el user_id del endpoint
+                            if creator_id == user_id {
+                                // Precio en Robux
+                                let price_i64 = details["PriceInRobux"]
+                                    .as_i64()
+                                    .or_else(|| details["Price"].as_i64())
+                                    .unwrap_or(0);
 
-                            let price = price_i64 as i32;
+                                let price = price_i64 as i32;
 
-                            // Saltar gamepasses de 0 Robux
-                            if price <= 0 {
-                                continue;
-                            }
+                                // Saltar pases gratis
+                                if price <= 0 {
+                                    continue;
+                                }
 
-                            // Evitar duplicados
-                            if seen_ids.insert(pass.id) {
-                                result.push(Gamepass {
-                                    id: pass.id,
-                                    name: pass.name.clone(),
-                                    price,
-                                });
+                                // Evitar duplicados
+                                if seen_ids.insert(pass.id) {
+                                    result.push(Gamepass {
+                                        id: pass.id,
+                                        name: pass.name.clone(),
+                                        price,
+                                    });
+                                }
                             }
                         }
                     }
@@ -104,7 +109,15 @@ async fn get_passes(Path(user_id): Path<u64>) -> Json<ApiResponse> {
 
 #[tokio::main]
 async fn main() {
-    // Ruta: /user/:id/passes
+    // Cargar la API key de Open Cloud (aunque todavía no la usemos para el endpoint nuevo)
+    // Esto ayuda a detectar si está mal configurada en Railway.
+    if let Err(_) = env::var("OPEN_CLOUD_API_KEY") {
+        println!("⚠️  Advertencia: OPEN_CLOUD_API_KEY no está definida en las variables de entorno.");
+        println!("    La API seguirá funcionando con la lógica antigua, pero no usará Open Cloud.");
+    } else {
+        println!("✅ OPEN_CLOUD_API_KEY detectada correctamente.");
+    }
+
     let app = Router::new().route("/user/:id/passes", get(get_passes));
 
     let port: u16 = env::var("PORT")
