@@ -2,9 +2,11 @@ use axum::{
     extract::Path,
     routing::get,
     Json, Router,
+    serve,
 };
 use serde::{Serialize, Deserialize};
-    use std::{collections::HashSet, env, net::SocketAddr};
+use std::{collections::HashSet, env, net::SocketAddr};
+use tokio::net::TcpListener;
 
 #[derive(Serialize)]
 struct ApiResponse {
@@ -37,7 +39,7 @@ struct RobloxPass {
 
 async fn get_passes(Path(user_id): Path<u64>) -> Json<ApiResponse> {
     let games = vec![
-        98889641203101u64,
+        98889641203101u64, // RobuxReborn 🔥
     ];
 
     let mut result: Vec<Gamepass> = Vec::new();
@@ -69,10 +71,12 @@ async fn get_passes(Path(user_id): Path<u64>) -> Json<ApiResponse> {
 
                                 let price = price_i64 as i32;
 
+                                // ignoramos precios 0 o negativos
                                 if price <= 0 {
                                     continue;
                                 }
 
+                                // evitamos duplicados
                                 if seen_ids.insert(pass.id) {
                                     result.push(Gamepass {
                                         id: pass.id,
@@ -106,10 +110,8 @@ async fn main() {
         .unwrap_or(8080);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    println!("🚀 Rust API escuchando en {addr}");
+    println!("🚀 Rust API escuchando en {}", addr);
 
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service())
-        .await
-        .unwrap();
+    let listener = TcpListener::bind(addr).await.unwrap();
+    serve(listener, app).await.unwrap();
 }
